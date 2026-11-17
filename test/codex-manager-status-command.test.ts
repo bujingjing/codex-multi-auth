@@ -171,6 +171,51 @@ describe("runStatusCommand", () => {
 		expect(output).not.toContain("2 ready");
 	});
 
+	it("does not keep a days-old cached 429 as a block or recommend an unknown account over the paid one", async () => {
+		// Three stored logins: #2 on a paid plan whose last probe (4.8 days ago)
+		// was a 429 with an exhausted secondary window and no reset time; #1 and
+		// #3 share one workspace and have never been observed.
+		const now = Date.UTC(2026, 10, 16, 12);
+		const observedAt = now - Math.round(4.8 * 24 * 60 * 60_000);
+		const storage: AccountStorageV3 = {
+			version: 3,
+			activeIndex: 2,
+			activeIndexByFamily: { codex: 2 },
+			accounts: [
+				{ email: "member-a@example.com", accountId: "ws-shared-fixture", refreshToken: "refresh-a", addedAt: 1, lastUsed: observedAt },
+				{ email: "owner@example.com", accountId: "ws-pro-fixture", refreshToken: "refresh-b", addedAt: 2, lastUsed: observedAt },
+				{ email: "member-b@example.com", accountId: "ws-shared-fixture", refreshToken: "refresh-c", addedAt: 3, lastUsed: observedAt },
+			],
+		};
+		const logInfo = vi.fn();
+		await runStatusCommand(createStatusDeps({
+			json: true,
+			logInfo,
+			getNow: () => now,
+			loadAccounts: async () => storage,
+			resolveActiveIndex: () => 2,
+			loadQuotaCache: async () => ({
+				byAccountId: {
+					"ws-pro-fixture": {
+						updatedAt: observedAt,
+						status: 429,
+						model: "fixture",
+						planType: "pro",
+						primary: { usedPercent: 100, resetAtMs: observedAt + 300 * 60_000, windowMinutes: 300 },
+						secondary: { usedPercent: 100 },
+					},
+				},
+				byEmail: {},
+			}),
+		}));
+		const payload = JSON.parse(String(logInfo.mock.calls.at(-1)?.[0])) as {
+			recommendedIndex: number | null;
+			accounts: Array<{ markers: string[] }>;
+		};
+		expect(payload.accounts[1]?.markers).not.toContain("rate-limited");
+		expect(payload.recommendedIndex).toBe(1);
+	});
+
 	it("derives compact quota labels from windowMinutes instead of fixed 5h/7d", async () => {
 		const logInfo = vi.fn();
 		const deps = createStatusDeps({

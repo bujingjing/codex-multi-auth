@@ -100,6 +100,7 @@ import {
 	isModelAtCapacityError,
 	isWorkspaceDisabledError,
 } from "./request/fetch-helpers.js";
+import { isWorkspaceOutOfCreditsError } from "./request/error-classification.js";
 import {
 	PreemptiveQuotaScheduler,
 	readQuotaSchedulerSnapshot,
@@ -3367,6 +3368,27 @@ async function handleRequestInner(
 				},
 				receiptReadFailed: resetCreditState === null,
 			};
+			// "Out of credits" rejects every login of the workspace until its owner
+			// refills it, and names no reset time. Bench all of them for the
+			// local-rejection ceiling so the next candidate is another workspace;
+			// the first request after the ceiling re-checks upstream.
+			const benchOutOfCreditsWorkspace = (workspaceId: string): void => {
+				const target = responseStateTarget();
+				for (const row of target.accountManager.getAccountsSnapshot()) {
+					const member = target.accountManager.getAccountByIndex(row.index);
+					if (!member || (member !== target.account && !workspaceIds(member).has(workspaceId))) continue;
+					target.accountManager.markRateLimitedWithReason(
+						member,
+						RATE_LIMIT_CACHE_TTL_MS,
+						context.family,
+						"quota",
+						context.model,
+						modelScopeId("oauth", resolveAccountRecordId(member), workspaceId),
+						member === target.account ? { workspaceId, ...dispatchedReceipts } : { workspaceId },
+					);
+				}
+				target.accountManager.saveToDiskDebounced();
+			};
 			const outboundHeaders = createOutboundHeaders(
 				context.headers,
 				refreshed.account,
@@ -3641,6 +3663,7 @@ async function handleRequestInner(
 				// retry-after window on an outage that affects every account.
 				const modelAtCapacity = isModelAtCapacityError(upstream.status, bodyText);
 				const subscriptionQuotaExceeded = isSubscriptionQuota429(upstream.status, bodyText);
+				if (isResponsesRequest && isWorkspaceOutOfCreditsError(bodyText)) benchOutOfCreditsWorkspace(accountId);
 				if (modelAtCapacity) {
 					const outcome = await waitOutModelCapacity(
 						retryAfterHintMs,
@@ -3776,6 +3799,20 @@ async function handleRequestInner(
 					state.status.retries += 1;
 					noteRotation();
 					continue;
+				}
+				if (isResponsesRequest && isWorkspaceOutOfCreditsError(bodyText)) {
+					benchOutOfCreditsWorkspace(accountId);
+					state.sessionAffinityStore?.forgetSession(context.sessionKey);
+					// A pin has no other account to try: hand Codex the upstream
+					// message below instead of a generic pool-exhausted reply.
+					if (!isPinned) {
+						refundConsumedPoolToken(refreshed.account);
+						exhaustionReason = "rate-limit";
+						capabilityRejectionIsLatest = false;
+						state.status.retries += 1;
+						noteRotation();
+						continue;
+					}
 				}
 
 				if (isThreadGoalRequest && isThreadGoalFallbackStatus(upstream.status)) {

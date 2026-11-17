@@ -4366,6 +4366,56 @@ describe("runtime rotation proxy", () => {
 		);
 	});
 
+	it.each([402, 429])(
+		"benches every login of an out-of-credits workspace and fails over to the paid account (%i)",
+		async (status) => {
+			// Three stored logins: #1 and #3 belong to one workspace that has no
+			// credits left, #2 is on a paid plan. #3 is the active account.
+			const now = Date.now();
+			const storage = createStorage(now, 3);
+			storage.activeIndex = 2;
+			storage.activeIndexByFamily = { codex: 2 };
+			const [first, second, third] = storage.accounts;
+			if (!first || !second || !third) throw new Error("expected three accounts");
+			first.accountId = "ws-shared-fixture";
+			second.accountId = "ws-pro-fixture";
+			third.accountId = "ws-shared-fixture";
+			const accountManager = new AccountManager(undefined, storage);
+			const { calls, fetchImpl } = createRecordingFetch((call) =>
+				call.headers.get(OPENAI_HEADERS.ACCOUNT_ID) === "ws-shared-fixture"
+					? Response.json(
+						{
+							error: {
+								message:
+									"Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+							},
+						},
+						{ status },
+					)
+					: textEventStream("data: served\n\n"),
+			);
+			const proxy = await startProxy({ accountManager, fetchImpl });
+
+			const response = await postResponses(proxy, { model: "gpt-5-codex" });
+
+			expect(response.status).toBe(HTTP_STATUS.OK);
+			expect(await response.text()).toBe("data: served\n\n" + COMPLETED_FRAME);
+			expect(calls.map((call) => call.headers.get(OPENAI_HEADERS.ACCOUNT_ID))).toEqual([
+				"ws-shared-fixture",
+				"ws-pro-fixture",
+			]);
+			const codexKey = getQuotaKey(getModelFamily("gpt-5-codex"));
+			for (const index of [0, 2]) {
+				const account = accountManager.getAccountByIndex(index);
+				if (!account) throw new Error("expected account");
+				expect(quotaResetTime(account, codexKey)).toBeGreaterThan(now + 30 * 60_000);
+			}
+			const paid = accountManager.getAccountByIndex(1);
+			if (!paid) throw new Error("expected account");
+			expect(quotaResetTime(paid, codexKey)).toBe(0);
+		},
+	);
+
 	it("reports a transient exhaustion reason when deactivated skips also occurred", async () => {
 		const now = Date.now();
 		const accountManager = new AccountManager(undefined, createStorage(now, 3));

@@ -3,6 +3,7 @@ import {
 	formatAccountLabel,
 	formatWaitTime,
 } from "./accounts.js";
+import { RATE_LIMIT_CACHE_TTL_MS } from "./constants.js";
 import type { CodexQuotaSnapshot } from "./quota-probe.js";
 import type { QuotaCacheData } from "./quota-cache.js";
 import {
@@ -68,6 +69,9 @@ export interface ForecastAccountResult {
 	// still treat them as a timed wait), but they must NOT be recommended as a
 	// "pick shortest wait" fallback when every account is exhausted.
 	exhausted: boolean;
+	// True when neither a quota probe nor the quota cache has ever described
+	// this account, so its plan and remaining quota are unknown.
+	unobserved?: boolean;
 }
 
 export interface ForecastRecommendation {
@@ -339,7 +343,14 @@ export function evaluateForecastAccount(
 		reasons.push(`runtime skip: ${overlayReason}`);
 	}
 
-	const quota = input.liveQuota;
+	// A snapshot older than the local-rejection ceiling is unknown usage, not
+	// proof of a current block: the same rule isQuotaCacheEntryExhausted applies
+	// to cached entries. Callers that feed cached entries here set observedAt.
+	const observedAt = input.liveQuota?.observedAt;
+	const quota =
+		typeof observedAt === "number" && now >= observedAt + RATE_LIMIT_CACHE_TTL_MS
+			? undefined
+			: input.liveQuota;
 	if (quota) {
 		const primaryUsed = quota.primary.usedPercent ?? 0;
 		const secondaryUsed = quota.secondary.usedPercent ?? 0;
@@ -428,6 +439,7 @@ export function evaluateForecastAccount(
 		hardFailure,
 		disabled,
 		exhausted,
+		unobserved: !input.liveQuota && !quotaEntry,
 	};
 }
 
@@ -435,6 +447,15 @@ export function evaluateForecastAccounts(
 	inputs: ForecastAccountInput[],
 ): ForecastAccountResult[] {
 	return inputs.map((input) => evaluateForecastAccount(input));
+}
+
+// An account nobody has observed may be out of credits or on no plan at all.
+// It must not outrank an observed account on the current-account bonus alone,
+// so it carries the same weight as a week of disuse when the two are ranked.
+const UNOBSERVED_ACCOUNT_RISK = 10;
+
+function rankingRisk(result: ForecastAccountResult): number {
+	return result.riskScore + (result.unobserved ? UNOBSERVED_ACCOUNT_RISK : 0);
 }
 
 function compareForecastResults(
@@ -458,8 +479,8 @@ function compareForecastResults(
 		return a.waitMs - b.waitMs;
 	}
 
-	if (a.riskScore !== b.riskScore) {
-		return a.riskScore - b.riskScore;
+	if (rankingRisk(a) !== rankingRisk(b)) {
+		return rankingRisk(a) - rankingRisk(b);
 	}
 
 	if (a.isCurrent !== b.isCurrent) {

@@ -138,6 +138,18 @@ export function isQuotaCacheEntryExhausted(
 	);
 }
 
+/**
+ * A cached 429 is a block only while it is younger than the local-rejection
+ * ceiling. An older one says nothing about the account now: its window has
+ * either reset or must be re-checked, so it reads as unknown, never as blocked.
+ */
+export function isQuotaCacheEntryRateLimited(
+	entry: Pick<QuotaCacheEntry, "status" | "updatedAt"> | null | undefined,
+	now = Date.now(),
+): boolean {
+	return entry?.status === 429 && Number.isFinite(entry.updatedAt) && now < entry.updatedAt + RATE_LIMIT_CACHE_TTL_MS;
+}
+
 /** Cache identity includes the credential record, so shared organization IDs cannot collide. */
 export function quotaWorkspaceKey(account: QuotaCacheAccountRef, workspaceId: string): string | undefined {
     const recordId = account.recordId?.trim() || (account.refreshToken !== undefined && account.addedAt !== undefined

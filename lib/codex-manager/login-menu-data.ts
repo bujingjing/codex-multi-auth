@@ -28,6 +28,7 @@ import {
 	hasSafeQuotaEmailFallback,
 	hasUniqueQuotaAccountId,
 	isQuotaCacheEntryExhausted,
+	isQuotaCacheEntryRateLimited,
 	normalizeQuotaAccountId,
 	quotaLeftPercentFromUsed,
 } from "../quota-readiness.js";
@@ -292,7 +293,7 @@ function mapAccountStatus(
 	if (persistedQuotaEntry && isQuotaCacheEntryExhausted(persistedQuotaEntry, now)) {
 		return "quota-exhausted";
 	}
-	if (persistedQuotaEntry?.status === 429) return "rate-limited";
+	if (isQuotaCacheEntryRateLimited(persistedQuotaEntry, now)) return "rate-limited";
 	const rateLimit = formatRateLimitEntry(account, now, "codex");
 	if (rateLimit) return "rate-limited";
 	if (isCurrentAccount) return "active";
@@ -488,7 +489,7 @@ export function toExistingAccountInfo(
 			quota7dResetAtMs: entry?.secondary.resetAtMs,
 			quotaPrimaryWindowMinutes: entry?.primary.windowMinutes,
 			quotaSecondaryWindowMinutes: entry?.secondary.windowMinutes,
-			quotaRateLimited: entry?.status === 429,
+			quotaRateLimited: isQuotaCacheEntryRateLimited(entry, now),
 			quotaExhausted,
 			isCurrentAccount,
 			isDefaultAccount: index === activeIndex,

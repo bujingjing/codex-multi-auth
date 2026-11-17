@@ -24,6 +24,7 @@ import type { ModelFamily } from "../../prompts/codex.js";
 import {
 	findQuotaCacheEntryForAccount,
 	isQuotaCacheEntryExhausted,
+	isQuotaCacheEntryRateLimited,
 } from "../../quota-readiness.js";
 import type { QuotaCacheData, QuotaCacheWindow } from "../../quota-cache.js";
 import { formatWebsocketDisconnect, type AppBindRouterStatus } from "../../runtime/app-bind.js";
@@ -116,7 +117,7 @@ function buildAccountMarkers(
 	}
 	if (formatRateLimitEntry(account, now, "codex")) markers.push("rate-limited");
 	const quotaEntry = findQuotaCacheEntryForAccount(quotaCache, account, allAccounts);
-	if (quotaEntry?.status === 429 && !markers.some(isRateLimitedMarker)) {
+	if (isQuotaCacheEntryRateLimited(quotaEntry, now) && !markers.some(isRateLimitedMarker)) {
 		markers.push("rate-limited");
 	}
 	if (isQuotaCacheEntryExhausted(quotaEntry, now)) markers.push("quota-exhausted");
@@ -482,7 +483,7 @@ export async function runStatusCommand(
   const primary = forecastQuotaWindow(entry.primary, entry.updatedAt, now);
   const secondary = forecastQuotaWindow(entry.secondary, entry.updatedAt, now);
   if (![primary, secondary].some(window => typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent))) return null;
-  return {...entry, primary, secondary};
+  return {...entry, observedAt: entry.updatedAt, primary, secondary};
  });
  const forecastResults = evaluateForecastAccounts(
 		storage.accounts.map((account, index) => ({

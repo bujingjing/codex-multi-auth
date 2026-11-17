@@ -363,6 +363,16 @@ export function isEntitlementError(code: string, bodyText: string): boolean {
 }
 
 /**
+ * Detects "Your workspace is out of credits" rejections. The workspace owner has
+ * to refill it, so every login of that workspace fails the same way and the
+ * response carries no reset time. Matched on the message because the upstream
+ * sends it under more than one status.
+ */
+export function isWorkspaceOutOfCreditsError(bodyText: string): boolean {
+        return /\bout of credits\b/i.test(bodyText);
+}
+
+/**
  * Detects whether an error indicates the workspace/account has been disabled or expired.
  *
  * Workspace disabled errors signal that the current workspace is no longer accessible

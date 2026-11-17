@@ -46,6 +46,7 @@ import { listRuntimeHelperStatusPaths } from "../../runtime-constants.js";
 import {
 	findQuotaCacheEntryForAccount,
 	isQuotaCacheEntryExhausted,
+	isQuotaCacheEntryRateLimited,
 } from "../../quota-readiness.js";
 import type { QuotaCacheData } from "../../quota-cache.js";
 import {
@@ -790,7 +791,7 @@ async function printRotationStatus(deps: RotationCommandDeps): Promise<number> {
 			storage.accounts,
 		);
 		if (
-			quotaEntry?.status === 429 &&
+			isQuotaCacheEntryRateLimited(quotaEntry, now) &&
 			!markers.some((marker) => isRateLimitedMarker(marker))
 		) {
 			markers.push("rate-limited");
