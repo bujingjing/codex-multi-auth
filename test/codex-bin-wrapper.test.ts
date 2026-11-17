@@ -1471,6 +1471,75 @@ describe("codex bin wrapper", () => {
 		);
 	});
 
+	it("streams captured Codex output while the child runs and keeps the final bytes unchanged", async () => {
+		const fixtureRoot = createWrapperFixture();
+		const codexHome = join(fixtureRoot, "codex-home");
+		mkdirSync(codexHome, { recursive: true });
+		const releasePath = join(fixtureRoot, "release-child");
+		const sessionId = "019ddf47-2c01-7c73-9f81-ab0cd9c1d5b7";
+		const fakeBin = createCustomFakeCodexBin(fixtureRoot, [
+			"const fs = require('node:fs');",
+			`const releasePath = ${JSON.stringify(releasePath)};`,
+			`const sessionId = ${JSON.stringify(sessionId)};`,
+			"process.stdout.write('{\"type\":\"thread.started\",\"thread_id\":\"fixture-thread\"}\\n');",
+			"process.stderr.write('progress line\\n');",
+			"const timer = setInterval(() => {",
+			"  if (!fs.existsSync(releasePath)) return;",
+			"  clearInterval(timer);",
+			"  process.stdout.write('2026-04-30T16:44:39.000000Z ERROR codex_core::session: failed to record rollout items: thread ');",
+			"  setTimeout(() => {",
+			"    process.stdout.write(`\\n${sessionId} not found\\n{\"type\":\"turn.completed\"}\\r\\npartial-last-line`);",
+			"    process.stderr.write('tail without newline');",
+			"    process.exit(0);",
+			"  }, 50);",
+			"}, 20);",
+		]);
+		const child = spawn(
+			process.execPath,
+			[join(fixtureRoot, "scripts", "codex.js"), "exec", "--json", "status"],
+			{
+				env: buildWrapperEnv({
+					CODEX_HOME: codexHome,
+					CODEX_MULTI_AUTH_REAL_CODEX_BIN: fakeBin,
+					CODEX_MULTI_AUTH_RUNTIME_ROTATION_PROXY: "0",
+					CODEX_MULTI_AUTH_CAPTURE_FORWARD_OUTPUT: "1",
+				}),
+				stdio: ["ignore", "pipe", "pipe"],
+			},
+		);
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+		const closed = new Promise<number | null>((resolveClose) => {
+			child.once("close", (code) => resolveClose(code));
+		});
+		try {
+			const deadline = Date.now() + 10_000;
+			while (!stdout.includes("fixture-thread") && Date.now() < deadline) {
+				await sleep(20);
+			}
+			// The child is still parked on the release file, so this output can only
+			// have arrived by streaming, not from the wrapper's exit-time flush.
+			expect(stdout).toBe('{"type":"thread.started","thread_id":"fixture-thread"}\n');
+			expect(stderr).toContain("progress line\n");
+		} finally {
+			writeFileSync(releasePath, "", "utf8");
+		}
+		expect(await closed).toBe(0);
+		expect(stdout).toBe(
+			'{"type":"thread.started","thread_id":"fixture-thread"}\n{"type":"turn.completed"}\npartial-last-line',
+		);
+		expect(stderr).toContain("progress line\ntail without newline\n");
+		expect(stderr).not.toContain("failed to record rollout items");
+	}, 30_000);
+
 	it("does not repair local session index for failed forwarded runs", () => {
 		const fixtureRoot = createWrapperFixture();
 		const codexHome = join(fixtureRoot, "codex-home");

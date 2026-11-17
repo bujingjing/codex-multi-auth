@@ -1781,42 +1781,80 @@ function rewriteAppServerAccountReadResponseLine(line, pendingAuthRequestMethods
 	})}${lineEnding}`;
 }
 
-function filterKnownForwardedCodexStderr(text) {
-	if (typeof text !== "string" || text.length === 0) {
-		return "";
-	}
-	const lines = text.split(/\r?\n/);
-	const filtered = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const line = lines[index];
-		if (
-			/ERROR codex_core::session: failed to record rollout items: thread\s*$/.test(
-				line,
-			) &&
-			/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} not found$/i.test(
-				lines[index + 1] ?? "",
-			)
-		) {
-			index += 1;
-			continue;
+const ROLLOUT_NOISE_HEAD =
+	/ERROR codex_core::session: failed to record rollout items: thread\s*$/;
+const ROLLOUT_NOISE_TAIL =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} not found$/i;
+const RMCP_NOISE_HEAD =
+	/ERROR rmcp::transport::streamable_http_client: fail to delete session:\s*$/;
+const RMCP_NOISE_TAIL =
+	/^unexpected server response: DELETE returned HTTP 404 session_id="/;
+const ENDS_WITH_QUOTE = /"\s*$/;
+// The unsupported-model retry parser reads only the error Codex prints as it
+// exits, so a bounded tail of each stream is all a long run has to keep.
+const FORWARDED_OUTPUT_TAIL_CHARS = 64 * 1024;
+
+/**
+ * Drop known Codex log noise from one output stream as it arrives. Whole lines
+ * only: a noise head is held until the next line shows whether it opens a
+ * known pair. `push` and `end` return the text to forward; across a stream
+ * that text equals the whole stream split on CRLF/LF, filtered and re-joined
+ * with LF, which is what the wrapper printed when it buffered until exit.
+ */
+function createKnownCodexNoiseFilter() {
+	let partial = "";
+	let held = null;
+	let skippingToQuote = false;
+	const take = (line, terminated) => {
+		if (skippingToQuote) {
+			if (ENDS_WITH_QUOTE.test(line)) skippingToQuote = false;
+			return "";
 		}
-		if (
-			/ERROR rmcp::transport::streamable_http_client: fail to delete session:\s*$/.test(
-				line,
-			) &&
-			/^unexpected server response: DELETE returned HTTP 404 session_id="/.test(
-				lines[index + 1] ?? "",
-			)
-		) {
-			index += 1;
-			while (index + 1 < lines.length && !/"\s*$/.test(lines[index])) {
-				index += 1;
+		let kept = "";
+		if (held !== null) {
+			const head = held;
+			held = null;
+			if (head.tail.test(line)) {
+				skippingToQuote =
+					head.tail === RMCP_NOISE_TAIL && !ENDS_WITH_QUOTE.test(line);
+				return "";
 			}
-			continue;
+			kept = `${head.line}\n`;
 		}
-		filtered.push(line);
-	}
-	return filtered.join("\n");
+		const tail = !terminated
+			? null
+			: ROLLOUT_NOISE_HEAD.test(line)
+				? ROLLOUT_NOISE_TAIL
+				: RMCP_NOISE_HEAD.test(line)
+					? RMCP_NOISE_TAIL
+					: null;
+		if (tail) {
+			held = { line, tail };
+			return kept;
+		}
+		return kept + (terminated ? `${line}\n` : line);
+	};
+	return {
+		push(text) {
+			const lines = (partial + text).split("\n");
+			partial = lines.pop() ?? "";
+			return lines
+				.map((line) => take(line.endsWith("\r") ? line.slice(0, -1) : line, true))
+				.join("");
+		},
+		end() {
+			const last = partial;
+			partial = "";
+			return take(last, false);
+		},
+	};
+}
+
+function keepOutputTail(tail, text) {
+	const next = tail + text;
+	return next.length > FORWARDED_OUTPUT_TAIL_CHARS
+		? next.slice(-FORWARDED_OUTPUT_TAIL_CHARS)
+		: next;
 }
 
 function withCiKnownForwardedCodexLogSilencers(env) {
@@ -1844,6 +1882,30 @@ function forwardToRealCodexOnce(
 		let stdout = "";
 		let stderr = "";
 		const captureOutput = options.captureOutput === true;
+		// Captured output is forwarded as it arrives, line by line, so a headless
+		// run is observable while it runs; only a tail of each stream is kept for
+		// the caller's retry parsing.
+		const stdoutFilter = createKnownCodexNoiseFilter();
+		const stderrFilter = createKnownCodexNoiseFilter();
+		const forwardStdout = (text) => {
+			if (text.length > 0) process.stdout.write(text);
+		};
+		// Stderr that is only whitespace was never printed; hold leading blank
+		// lines until real content shows up.
+		let stderrForwarded = false;
+		let stderrEndsWithNewline = false;
+		let heldBlankStderr = "";
+		const forwardStderr = (text) => {
+			if (text.length === 0) return;
+			if (!stderrForwarded && text.trim().length === 0) {
+				heldBlankStderr += text;
+				return;
+			}
+			process.stderr.write(heldBlankStderr + text);
+			heldBlankStderr = "";
+			stderrForwarded = true;
+			stderrEndsWithNewline = text.endsWith("\n");
+		};
 		const proxyAppServerAccountRead =
 			options.proxyAppServerAccountRead === true;
 		const protocolProxy = proxyAppServerAccountRead
@@ -1879,19 +1941,11 @@ function forwardToRealCodexOnce(
 			// onRelayedSignal) rather than a default kill that truncates
 			// shadow-home sync-back.
 			detachSignalRelay();
-			if (captureOutput && stdout.length > 0) {
-				const filteredStdout = filterKnownForwardedCodexStderr(stdout);
-				if (filteredStdout.length > 0) {
-					process.stdout.write(filteredStdout);
-				}
-			}
-			if (captureOutput && stderr.length > 0) {
-				const filteredStderr = filterKnownForwardedCodexStderr(stderr);
-				if (filteredStderr.trim().length > 0) {
-					process.stderr.write(filteredStderr);
-					if (!filteredStderr.endsWith("\n")) {
-						process.stderr.write("\n");
-					}
+			if (captureOutput) {
+				forwardStdout(stdoutFilter.end());
+				forwardStderr(stderrFilter.end());
+				if (stderrForwarded && !stderrEndsWithNewline) {
+					process.stderr.write("\n");
 				}
 			}
 			resolve({
@@ -1907,7 +1961,7 @@ function forwardToRealCodexOnce(
 		let child;
 		const failLaunch = (error) => {
 			const message = `Failed to launch real Codex CLI: ${String(error)}`;
-			stderr += `${stderr ? "\n" : ""}${message}`;
+			stderr = keepOutputTail(stderr, `${stderr ? "\n" : ""}${message}`);
 			console.error(message);
 			finalize(1);
 		};
@@ -2045,13 +2099,16 @@ function forwardToRealCodexOnce(
 			child.stdout?.on("end", onChildStdoutEnd);
 			child.stderr?.on("data", onChildStderrData);
 		} else if (captureOutput) {
-			child.stdout?.on("data", (chunk) => {
-				const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-				stdout += text;
+			// The decoder keeps a multi-byte character split across chunks whole.
+			child.stdout?.setEncoding("utf8");
+			child.stderr?.setEncoding("utf8");
+			child.stdout?.on("data", (text) => {
+				stdout = keepOutputTail(stdout, text);
+				forwardStdout(stdoutFilter.push(text));
 			});
-			child.stderr?.on("data", (chunk) => {
-				const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-				stderr += text;
+			child.stderr?.on("data", (text) => {
+				stderr = keepOutputTail(stderr, text);
+				forwardStderr(stderrFilter.push(text));
 			});
 		}
 

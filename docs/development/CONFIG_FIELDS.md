@@ -211,7 +211,7 @@ Read by `scripts/codex.js` (the `codex-multi-auth-codex` wrapper) or the runtime
 | `CODEX_MULTI_AUTH_AUTO_SYNC_ON_STARTUP` | `0` skips best-effort active-account sync around forwarded Codex launches |
 | `CODEX_MULTI_AUTH_STATUSLINE` | `0`/`1` toggles the forwarded-session status line (TTY default) |
 | `CODEX_MULTI_AUTH_STATUS_QUOTA_REFRESH_INTERVAL_MS` | Minimum age before the wrapper refreshes quota cache for status displays (default `600000`; `0` always refreshes) |
-| `CODEX_MULTI_AUTH_CAPTURE_FORWARD_OUTPUT` | `1`/`0` forces capture of forwarded Codex output for unsupported-model fallback handling (default: on when not a TTY or `CODEX_CI=1`) |
+| `CODEX_MULTI_AUTH_CAPTURE_FORWARD_OUTPUT` | `1`/`0` forces capture of forwarded Codex output for unsupported-model fallback handling (default: on when not a TTY or `CODEX_CI=1`); captured output is still forwarded line by line as it arrives, and only the last 64 KiB of each stream is kept for that parsing |
 | `CODEX_CI` | `1` marks CI runs for the wrapper: forces forward-output capture and silences known noisy `codex_core` log targets via `RUST_LOG` when unset |
 | `CODEX_MULTI_AUTH_DEBUG` | `1` enables verbose wrapper/debug notices (also shows the npm update notice off-TTY) |
 | `CODEX_MULTI_AUTH_UPDATE_NOTICE_STARTUP_BUDGET_MS` | Total ms budget for the daily best-effort npm version check (default `3000`; ~80% becomes the fetch timeout) |
